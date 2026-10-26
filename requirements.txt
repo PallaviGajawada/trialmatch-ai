@@ -1,4 +1,6 @@
 pydantic>=2.0.0
+pandas
+requests
 pytest>=7.0.0
 fastapi>=0.100.0
 uvicorn>=0.20.0
