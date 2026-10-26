@@ -8,7 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from src.api.dependencies import get_coordinator
+from src.agents.adapter import ClinicalAgentsAdapter
+from src.api.dependencies import get_adapter, get_coordinator
 from src.api.schemas import EvaluationRequest, HealthResponse
 from src.matching.coordinator import EligibilityCoordinator
 from src.matching.schema import (
@@ -72,26 +73,36 @@ def create_app() -> FastAPI:
     @application.get("/health", response_model=HealthResponse, tags=["Health"])
     def health_check(
         coordinator: EligibilityCoordinator = Depends(get_coordinator),
+        adapter: Optional[ClinicalAgentsAdapter] = Depends(get_adapter),
     ) -> HealthResponse:
         """
         Check health status and readiness of the backend.
 
-        Does not claim operational eligibility pipeline if agents are unconfigured.
+        Does not claim operational eligibility pipeline if agents or evaluation datasets are unconfigured.
         """
-        agents_count = len(coordinator.registered_agents)
-        agents_configured = agents_count > 0
+        coordinator_has_agents = len(coordinator.registered_agents) > 0
+        adapter_configured = adapter is not None and adapter.is_configured()
+
+        is_operational = coordinator_has_agents or adapter_configured
+
+        registered_agents: List[str] = []
+        if coordinator_has_agents:
+            registered_agents = list(coordinator.registered_agents.keys())
+        elif adapter_configured and adapter is not None:
+            registered_agents = list(adapter.as_runners_dict().keys())
+
         pipeline_status = (
             "operational"
-            if agents_configured
+            if is_operational
             else "agents_unconfigured_pipeline_incomplete"
         )
         return HealthResponse(
             status="ok",
             service="trialmatch-ai-backend",
             version="1.0.0",
-            agents_configured=agents_configured,
+            agents_configured=is_operational,
             pipeline_status=pipeline_status,
-            registered_agents=list(coordinator.registered_agents.keys()),
+            registered_agents=registered_agents,
         )
 
     @application.post(
@@ -103,6 +114,7 @@ def create_app() -> FastAPI:
     def evaluate_patient(
         request: EvaluationRequest,
         coordinator: EligibilityCoordinator = Depends(get_coordinator),
+        adapter: Optional[ClinicalAgentsAdapter] = Depends(get_adapter),
     ) -> ScreeningReport:
         """
         Evaluate a patient's eligibility against clinical trial criteria.
@@ -110,7 +122,7 @@ def create_app() -> FastAPI:
         Uses the deterministic decision engine and preserved evidence provenance.
         """
         try:
-            # If agent results were pre-collected or supplied directly
+            # 1. If agent results were pre-collected or supplied directly
             if request.agent_results is not None:
                 return coordinator.evaluate(
                     patient_id=request.patient_id,
@@ -120,7 +132,7 @@ def create_app() -> FastAPI:
                     required_criteria=request.required_criteria,
                 )
 
-            # If coordinator has registered agent runners configured
+            # 2. If coordinator already has registered agent runners configured (e.g. test overrides)
             if coordinator.registered_agents:
                 return coordinator.evaluate_with_agents(
                     patient_id=request.patient_id,
@@ -129,7 +141,17 @@ def create_app() -> FastAPI:
                     required_criteria=request.required_criteria,
                 )
 
-            # If no agent results provided and no agents configured on server:
+            # 3. If adapter is available and configured with patient/trial data
+            if adapter is not None and adapter.is_configured():
+                return coordinator.evaluate_with_agents(
+                    patient_id=request.patient_id,
+                    trial_id=request.trial_id,
+                    agents_to_run=adapter.as_runners_dict(),
+                    required_agents=request.required_agents,
+                    required_criteria=request.required_criteria,
+                )
+
+            # 4. If no agent results provided and no datasets or agents configured on server:
             # Report that evaluation is incomplete. Do NOT fabricate successful eligibility.
             return ScreeningReport(
                 patient_id=request.patient_id,
@@ -138,14 +160,14 @@ def create_app() -> FastAPI:
                 requires_human_review=True,
                 reasons=[
                     "Evaluation is incomplete: no eligibility agents are currently registered or configured on this backend.",
-                    "Person 1 eligibility agents must be implemented and registered before automated multi-agent evaluation can execute.",
+                    "Clinical dataset files (Synthea CSVs) or eligibility agent runners must be configured before automated evaluation can execute.",
                 ],
                 counts=EvaluationCounts(),
                 criterion_results=[],
                 missing_agents=list(request.required_agents or []),
                 missing_criteria=list(request.required_criteria or []),
                 errors=[
-                    "No eligibility agents configured; unable to execute agent runners."
+                    "Clinical evaluation datasets are unavailable or eligibility agents are unconfigured; unable to execute agent runners."
                 ],
             )
 

@@ -74,6 +74,26 @@ class ClinicalAgentsAdapter:
         self.criteria_specs = dict(criteria_specs) if criteria_specs else {}
         self.data_dir = Path(data_dir) if data_dir else Path("data")
 
+    def is_configured(self) -> bool:
+        """
+        Check whether patient and trial data are configured and accessible,
+        either through injected in-memory DataFrames or verified presence of
+        local dataset files on disk. Does NOT load patient records into memory.
+        """
+        if self._patients is not None:
+            return True
+
+        synthea_dir = self.data_dir / "patients" / "synthea"
+        patients_csv = synthea_dir / "patients.csv"
+        conditions_csv = synthea_dir / "conditions.csv"
+        observations_csv = synthea_dir / "observations.csv"
+
+        return (
+            patients_csv.is_file()
+            and conditions_csv.is_file()
+            and observations_csv.is_file()
+        )
+
     # -------------------------------------------------------------------------
     # Lazy Data Resolution
     # -------------------------------------------------------------------------
