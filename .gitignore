@@ -10,4 +10,11 @@ venv/
 data/processed/*
 !data/processed/.gitkeep
 
+data/trials/*.json
+
 data/patients/synthea/
+# Generated demo results
+outputs/
+
+# Python cache
+__pycache__/

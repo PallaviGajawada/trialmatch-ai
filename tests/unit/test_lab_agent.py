@@ -50,6 +50,29 @@ class TestLabAgent(unittest.TestCase):
         )
         self.assertEqual(result["status"], "UNKNOWN")
 
+    def test_hemoglobin_a1c_alias_matches_synthea_name(self):
+        observations = pd.DataFrame({
+            "patient_id": ["P1"],
+            "observation": [
+                "Hemoglobin A1c/Hemoglobin.total in Blood"
+            ],
+            "value": ["5.9"],
+            "units": ["%"],
+            "observation_date": ["2025-03-27"]
+        })
+
+        result = evaluate_lab(
+            observations,
+            "P1",
+            "Hemoglobin A1c",
+            "<",
+            9.0,
+            "%"
+        )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["value"], 5.9)
+
 
 if __name__ == "__main__":
     unittest.main()

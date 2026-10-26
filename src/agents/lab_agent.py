@@ -2,6 +2,15 @@
 import math
 import pandas as pd
 
+LAB_NAME_ALIASES = [
+    {
+        "hba1c",
+        "hemoglobin a1c",
+        "hemoglobin a1c/hemoglobin.total in blood",
+        "glycohemoglobin"
+    }
+]
+
 
 def evaluate_lab(
     observations,
@@ -41,8 +50,10 @@ def evaluate_lab(
 
     try:
         threshold = float(threshold)
+
         if not math.isfinite(threshold):
             return unknown("Threshold must be a finite number.")
+
     except (TypeError, ValueError):
         return unknown("Threshold is missing or invalid.")
 
@@ -51,14 +62,30 @@ def evaluate_lab(
         == str(patient_id).strip()
     ]
 
+    # Match common names to known lab observation names.
+    requested_name = str(test_name).strip().casefold()
+    accepted_names = {requested_name}
+
+    for aliases in LAB_NAME_ALIASES:
+        if requested_name in aliases:
+            accepted_names = aliases
+            break
+
+    observation_names = (
+        patient_rows["observation"]
+        .astype("string")
+        .str.strip()
+        .str.casefold()
+    )
+
     matching = patient_rows[
-        patient_rows["observation"].astype("string").str.strip().str.casefold()
-        == str(test_name).strip().casefold()
+        observation_names.isin(accepted_names)
     ].copy()
 
     if matching.empty:
         return unknown(f"No {test_name} result was found for this patient.")
 
+    # Check that the units match.
     if expected_unit is not None:
         if "units" not in matching.columns:
             return unknown("Lab units are unavailable for comparison.")
@@ -86,8 +113,10 @@ def evaluate_lab(
 
     try:
         value = float(latest["value"])
+
         if not math.isfinite(value):
             return unknown("The lab value is not a finite number.")
+
     except (TypeError, ValueError):
         return unknown("The lab value is missing or non-numeric.")
 
