@@ -1,8 +1,10 @@
-# Component 1: Coordinator & Deterministic Decision Engine
+# TrialMatch AI: Coordinator & Deterministic Decision Engine
 
 ## Overview
 
-The **Eligibility Coordinator** and **Deterministic Decision Engine** form the core clinical trial eligibility adjudication component of TrialMatch AI. This component coordinates multi-agent evaluation outputs, validates incoming data, and deterministically determines a patient's screening eligibility status without relying on opaque percentage scores or probabilistic guessing.
+The **Eligibility Coordinator** and **Deterministic Decision Engine** form the core clinical trial eligibility adjudication component of TrialMatch AI (Components 1 & 2). This component coordinates multi-agent evaluation outputs, enforces strict schema and semantic validation, and deterministically determines a patient's screening eligibility status without relying on opaque percentage scores or probabilistic guessing.
+
+For the exact contract and instructions for Person 1's agent implementations, see [docs/agent_contract.md](file:///c:/Projects/TrialMatch%20AI/docs/agent_contract.md).
 
 ---
 

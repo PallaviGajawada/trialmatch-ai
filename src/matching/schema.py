@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class StandardAgentId(str, Enum):
+    """Canonical recognized eligibility agent identifiers."""
+
+    DEMOGRAPHICS = "demographics_agent"
+    CONDITIONS = "conditions_agent"
+    LABS = "labs_agent"
+    MEDICATIONS = "medications_agent"
+    EXCLUSION = "exclusion_agent"
 
 
 class OverallStatus(str, Enum):
@@ -61,7 +71,7 @@ class EvidenceProvenance(BaseModel):
         None, description="Exact text excerpt or snippet supporting the finding."
     )
     confidence: Optional[float] = Field(
-        None, description="Optional extraction confidence score (0.0 to 1.0)."
+        None, ge=0.0, le=1.0, description="Optional extraction confidence score (0.0 to 1.0)."
     )
     timestamp: Optional[str] = Field(
         None, description="Timestamp of the clinical observation or extraction."
@@ -69,6 +79,13 @@ class EvidenceProvenance(BaseModel):
     metadata: Dict[str, Any] = Field(
         default_factory=dict, description="Additional context or provenance metadata."
     )
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Evidence source must be a non-empty string.")
+        return v.strip()
 
 
 class CriterionResult(BaseModel):
@@ -101,6 +118,33 @@ class CriterionResult(BaseModel):
         None, description="Identifier of the agent that evaluated this criterion."
     )
 
+    @field_validator("criterion_id")
+    @classmethod
+    def validate_criterion_id(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("criterion_id must be a non-empty string.")
+        return v.strip()
+
+    @field_validator("evidence")
+    @classmethod
+    def validate_evidence(
+        cls, v: Any
+    ) -> Optional[Union[EvidenceProvenance, Dict[str, Any], str]]:
+        if v is None:
+            return None
+        if isinstance(v, EvidenceProvenance):
+            return v
+        if isinstance(v, str):
+            if not v.strip():
+                return None
+            return v.strip()
+        if isinstance(v, dict):
+            # Validate dict structure through EvidenceProvenance
+            return EvidenceProvenance.model_validate(v)
+        raise ValueError(
+            f"Invalid evidence type: expected EvidenceProvenance, dict, or str, got {type(v).__name__}"
+        )
+
     @property
     def is_mandatory(self) -> bool:
         """Returns True if this criterion is mandatory for trial eligibility."""
@@ -128,6 +172,13 @@ class AgentResult(BaseModel):
         default_factory=dict,
         description="Additional agent execution metadata (execution time, version, etc.).",
     )
+
+    @field_validator("agent_id")
+    @classmethod
+    def validate_agent_id(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("agent_id must be a non-empty string.")
+        return v.strip()
 
 
 class EvaluationCounts(BaseModel):

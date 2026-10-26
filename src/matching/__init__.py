@@ -12,6 +12,7 @@ from src.matching.schema import (
     EvaluationCounts,
     OverallStatus,
     ScreeningReport,
+    StandardAgentId,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "AgentResult",
     "EvaluationCounts",
     "ScreeningReport",
+    "StandardAgentId",
 ]

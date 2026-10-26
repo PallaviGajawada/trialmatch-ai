@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 from src.matching.schema import (
     CriterionResult,
     CriterionStatus,
@@ -21,8 +21,8 @@ class DeterministicDecisionEngine:
     2. Any required criterion with status UNKNOWN results in REQUIRES_REVIEW,
        unless a mandatory failure already establishes NOT_A_MATCH.
     3. Missing agent outputs, evaluation errors, invalid statuses, missing required
-       criteria, or empty results result in REQUIRES_REVIEW (unless a mandatory failure
-       already establishes NOT_A_MATCH).
+       criteria, duplicate results, conflicting evaluations, or empty results result
+       in REQUIRES_REVIEW (unless a definitive mandatory failure already establishes NOT_A_MATCH).
     4. All mandatory criteria must be evaluated and PASS before returning POTENTIAL_MATCH.
     5. Optional criteria that are UNKNOWN do not block POTENTIAL_MATCH.
     6. Clinical eligibility is NEVER inferred from a percentage score.
@@ -71,9 +71,18 @@ class DeterministicDecisionEngine:
         missing_criteria: Optional[Sequence[str]] = None,
         agent_errors: Optional[Sequence[str]] = None,
         validation_errors: Optional[Sequence[str]] = None,
+        conflicting_criteria: Optional[Sequence[str]] = None,
     ) -> Tuple[OverallStatus, bool, List[str], EvaluationCounts]:
         """
         Evaluate criteria results and return deterministic eligibility decision.
+
+        Args:
+            criterion_results: Evaluated criteria to assess.
+            missing_agents: List of required agent IDs that failed to report.
+            missing_criteria: List of required criterion IDs that were not evaluated.
+            agent_errors: Errors reported during agent execution.
+            validation_errors: Schema or semantic validation errors encountered.
+            conflicting_criteria: IDs of criteria with contradictory evaluation results.
 
         Returns:
             Tuple of:
@@ -86,14 +95,18 @@ class DeterministicDecisionEngine:
         missing_criteria = list(missing_criteria or [])
         agent_errors = list(agent_errors or [])
         validation_errors = list(validation_errors or [])
+        conflict_set: Set[str] = set(conflicting_criteria or [])
 
         counts = self.compute_counts(criterion_results)
 
-        # Rule 1: A definitive failure of any mandatory criterion results in NOT_A_MATCH
+        # Rule 1: A definitive failure of any mandatory criterion results in NOT_A_MATCH.
+        # A criterion with conflicting evaluations across agents cannot be treated as a definitive failure.
         mandatory_fails = [
             c
             for c in criterion_results
-            if c.is_mandatory and c.status == CriterionStatus.FAIL
+            if c.is_mandatory
+            and c.status == CriterionStatus.FAIL
+            and c.criterion_id not in conflict_set
         ]
 
         if mandatory_fails:
@@ -109,6 +122,10 @@ class DeterministicDecisionEngine:
                 reasons.append(
                     f"Note: {counts.mandatory_unknown} mandatory criteria had UNKNOWN status, "
                     "but mandatory failure establishes NOT_A_MATCH."
+                )
+            if conflict_set:
+                reasons.append(
+                    f"Note: Conflicting evaluation on criterion/criteria: {', '.join(sorted(conflict_set))}."
                 )
             if missing_agents:
                 reasons.append(
@@ -129,6 +146,12 @@ class DeterministicDecisionEngine:
 
         # Rule 2 & 3: Check for conditions that preclude POTENTIAL_MATCH and require review
         review_reasons: List[str] = []
+
+        if conflict_set:
+            for cid in sorted(conflict_set):
+                review_reasons.append(
+                    f"Conflicting evaluation results for criterion '{cid}'."
+                )
 
         if validation_errors:
             review_reasons.extend(

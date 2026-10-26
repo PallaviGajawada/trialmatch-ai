@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Union
 from pydantic import ValidationError
 
 from src.matching.decision_rules import DeterministicDecisionEngine
@@ -27,11 +28,12 @@ class EligibilityCoordinator:
 
     Responsibilities:
     - Validate input parameters (patient_id, trial_id, agent_results).
+    - Detect invalid agent identifiers, duplicate agent reports, duplicate criteria, and conflicting evaluations.
     - Ensure all required agents have reported and all required criteria evaluated.
     - Aggregate criterion findings preserving provenance.
     - Invoke the deterministic decision engine.
     - Produce an auditable, structured ScreeningReport.
-    - Safely handle agent failures, malformed payloads, and unexpected exceptions.
+    - Safely handle agent failures, malformed payloads, timeouts, and unexpected exceptions.
     - Never assume an agent ran if it was not invoked.
     """
 
@@ -41,9 +43,13 @@ class EligibilityCoordinator:
         registered_agents: Optional[
             Mapping[str, Callable[[str, str], Union[AgentResult, Dict[str, Any]]]]
         ] = None,
+        allowed_agents: Optional[Sequence[str]] = None,
+        default_agent_timeout: Optional[float] = None,
     ):
         self.decision_engine = decision_engine or DeterministicDecisionEngine()
         self.registered_agents = dict(registered_agents) if registered_agents else {}
+        self.allowed_agents = set(allowed_agents) if allowed_agents else None
+        self.default_agent_timeout = default_agent_timeout
 
     def evaluate(
         self,
@@ -52,6 +58,7 @@ class EligibilityCoordinator:
         agent_results: Sequence[Union[AgentResult, Dict[str, Any]]],
         required_agents: Optional[Sequence[str]] = None,
         required_criteria: Optional[Sequence[str]] = None,
+        allowed_agents: Optional[Sequence[str]] = None,
     ) -> ScreeningReport:
         """
         Evaluate eligibility from pre-collected agent outputs.
@@ -62,17 +69,24 @@ class EligibilityCoordinator:
             agent_results: Sequence of AgentResult instances or raw result dicts.
             required_agents: Optional list of agent IDs that must report.
             required_criteria: Optional list of criterion IDs that must be evaluated.
+            allowed_agents: Optional list of authorized agent IDs.
 
         Returns:
             Structured ScreeningReport with deterministic eligibility outcome.
         """
         try:
+            effective_allowed_agents = (
+                set(allowed_agents)
+                if allowed_agents is not None
+                else self.allowed_agents
+            )
             return self._execute_evaluation(
                 patient_id=patient_id,
                 trial_id=trial_id,
                 agent_results=agent_results,
                 required_agents=required_agents,
                 required_criteria=required_criteria,
+                allowed_agents=effective_allowed_agents,
             )
         except Exception as exc:
             logger.exception("Unexpected exception in coordinator: %s", exc)
@@ -91,21 +105,46 @@ class EligibilityCoordinator:
         ] = None,
         required_agents: Optional[Sequence[str]] = None,
         required_criteria: Optional[Sequence[str]] = None,
+        allowed_agents: Optional[Sequence[str]] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> ScreeningReport:
         """
         Execute injected agent callables and evaluate patient eligibility.
 
         Never pretends an agent ran if it was not called.
+        Supports execution timeouts when timeout_seconds is provided.
         """
         runners = dict(self.registered_agents)
         if agents_to_run:
             runners.update(agents_to_run)
 
+        timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self.default_agent_timeout
+        )
+
         collected_results: List[AgentResult] = []
 
         for agent_id, runner in runners.items():
             try:
-                raw_result = runner(patient_id, trial_id)
+                if timeout and timeout > 0:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(runner, patient_id, trial_id)
+                        try:
+                            raw_result = future.result(timeout=timeout)
+                        except concurrent.futures.TimeoutError:
+                            collected_results.append(
+                                AgentResult(
+                                    agent_id=agent_id,
+                                    status=AgentExecutionStatus.ERROR,
+                                    error_message=f"Agent '{agent_id}' execution timed out after {timeout} seconds.",
+                                )
+                            )
+                            continue
+                else:
+                    raw_result = runner(patient_id, trial_id)
+
                 if isinstance(raw_result, AgentResult):
                     collected_results.append(raw_result)
                 elif isinstance(raw_result, dict):
@@ -134,6 +173,7 @@ class EligibilityCoordinator:
             agent_results=collected_results,
             required_agents=required_agents,
             required_criteria=required_criteria,
+            allowed_agents=allowed_agents,
         )
 
     def _execute_evaluation(
@@ -143,6 +183,7 @@ class EligibilityCoordinator:
         agent_results: Sequence[Union[AgentResult, Dict[str, Any]]],
         required_agents: Optional[Sequence[str]],
         required_criteria: Optional[Sequence[str]],
+        allowed_agents: Optional[Set[str]],
     ) -> ScreeningReport:
         validation_errors: List[str] = []
         agent_errors: List[str] = []
@@ -161,6 +202,9 @@ class EligibilityCoordinator:
 
         parsed_agents: List[AgentResult] = []
         aggregated_criteria: List[CriterionResult] = []
+        seen_agents: Set[str] = set()
+        seen_criteria: Dict[str, List[CriterionResult]] = {}
+        conflicting_criteria: Set[str] = set()
 
         for idx, item in enumerate(agent_results):
             if isinstance(item, AgentResult):
@@ -183,6 +227,26 @@ class EligibilityCoordinator:
                     f"Malformed agent output at index {idx}: expected AgentResult or dict, got {type(item).__name__}"
                 )
                 continue
+
+            # Validate agent_id
+            if not agent.agent_id or not agent.agent_id.strip():
+                validation_errors.append(
+                    f"Invalid agent_id at index {idx}: must be a non-empty string."
+                )
+                continue
+
+            # Validate against allowed_agents if configured
+            if allowed_agents is not None and agent.agent_id not in allowed_agents:
+                validation_errors.append(
+                    f"Unknown agent identifier: '{agent.agent_id}'. Allowed agents: {sorted(allowed_agents)}"
+                )
+
+            # Check for duplicate agent results
+            if agent.agent_id in seen_agents:
+                validation_errors.append(
+                    f"Duplicate agent result received for agent '{agent.agent_id}'."
+                )
+            seen_agents.add(agent.agent_id)
 
             parsed_agents.append(agent)
 
@@ -207,6 +271,32 @@ class EligibilityCoordinator:
                             f"Invalid status '{criterion.status}' on criterion '{criterion.criterion_id}' (agent '{agent.agent_id}')."
                         )
 
+                cid = criterion.criterion_id
+                if not cid or not isinstance(cid, str) or not cid.strip():
+                    validation_errors.append(
+                        f"Invalid criterion_id at index {crit_idx} in agent '{agent.agent_id}'."
+                    )
+                    continue
+
+                # Check for duplicate criterion evaluations
+                if cid in seen_criteria:
+                    prev_evals = seen_criteria[cid]
+                    validation_errors.append(
+                        f"Duplicate evaluation received for criterion '{cid}' (reported by '{criterion.agent_id}')."
+                    )
+
+                    # Check for conflicting criterion statuses
+                    conflicts = [p for p in prev_evals if p.status != criterion.status]
+                    if conflicts:
+                        conflicting_criteria.add(cid)
+                        conflict_msg = (
+                            f"Conflicting evaluation results for criterion '{cid}': "
+                            f"received '{criterion.status.value}' from '{criterion.agent_id}' but earlier received "
+                            f"{[p.status.value for p in prev_evals]} from {[p.agent_id for p in prev_evals]}."
+                        )
+                        validation_errors.append(conflict_msg)
+
+                seen_criteria.setdefault(cid, []).append(criterion)
                 aggregated_criteria.append(criterion)
 
         # Check required agents presence
@@ -233,6 +323,7 @@ class EligibilityCoordinator:
                 missing_criteria=missing_criteria,
                 agent_errors=agent_errors,
                 validation_errors=validation_errors,
+                conflicting_criteria=list(conflicting_criteria),
             )
         )
 

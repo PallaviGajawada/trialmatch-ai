@@ -380,3 +380,268 @@ def test_coordinator_optional_unknown_does_not_block_potential_match(
     assert report.counts.mandatory_passed == 1
     assert report.counts.optional_unknown == 1
 
+
+def test_coordinator_unknown_agent_identifier(coordinator: EligibilityCoordinator):
+    """Test validation: Unknown agent identifier rejected when allowed_agents is enforced."""
+    agent_results = [
+        AgentResult(
+            agent_id="unauthorized_third_party_agent",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_AGE",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                    observed_value=30,
+                    expected_value=">= 18",
+                )
+            ],
+        )
+    ]
+
+    report = coordinator.evaluate(
+        patient_id="PATIENT_012",
+        trial_id="NCT05001234",
+        agent_results=agent_results,
+        allowed_agents=["demographics_agent", "labs_agent"],
+    )
+
+    assert report.overall_status == OverallStatus.REQUIRES_REVIEW
+    assert report.requires_human_review is True
+    assert any("Unknown agent identifier" in err for err in report.errors)
+
+
+def test_coordinator_duplicate_agent_output(coordinator: EligibilityCoordinator):
+    """Test validation: Duplicate agent reports trigger REQUIRES_REVIEW."""
+    agent_results = [
+        AgentResult(
+            agent_id="demographics_agent",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_AGE",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                    observed_value=25,
+                    expected_value=">= 18",
+                )
+            ],
+        ),
+        AgentResult(
+            agent_id="demographics_agent",  # Duplicate agent
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_GENDER",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                    observed_value="Female",
+                    expected_value="All",
+                )
+            ],
+        ),
+    ]
+
+    report = coordinator.evaluate(
+        patient_id="PATIENT_013",
+        trial_id="NCT05001234",
+        agent_results=agent_results,
+    )
+
+    assert report.overall_status == OverallStatus.REQUIRES_REVIEW
+    assert report.requires_human_review is True
+    assert any("Duplicate agent result received for agent 'demographics_agent'" in err for err in report.errors)
+
+
+def test_coordinator_duplicate_mandatory_criterion_result(coordinator: EligibilityCoordinator):
+    """Test validation: Duplicate evaluation for the same criterion triggers REQUIRES_REVIEW."""
+    agent_results = [
+        AgentResult(
+            agent_id="demographics_agent_1",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_AGE",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                    observed_value=40,
+                    expected_value=">= 18",
+                )
+            ],
+        ),
+        AgentResult(
+            agent_id="demographics_agent_2",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_AGE",  # Duplicate criterion evaluation
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                    observed_value=40,
+                    expected_value=">= 18",
+                )
+            ],
+        ),
+    ]
+
+    report = coordinator.evaluate(
+        patient_id="PATIENT_014",
+        trial_id="NCT05001234",
+        agent_results=agent_results,
+    )
+
+    assert report.overall_status == OverallStatus.REQUIRES_REVIEW
+    assert report.requires_human_review is True
+    assert any("Duplicate evaluation received for criterion 'CRIT_AGE'" in err for err in report.errors)
+
+
+def test_coordinator_conflicting_criterion_outputs(coordinator: EligibilityCoordinator):
+    """Test validation: Conflicting outputs for the same criterion trigger REQUIRES_REVIEW."""
+    agent_results = [
+        AgentResult(
+            agent_id="pathology_agent",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_HER2_STATUS",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                    observed_value="HER2 Positive (IHC 3+)",
+                    expected_value="HER2+",
+                )
+            ],
+        ),
+        AgentResult(
+            agent_id="genomics_agent",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_HER2_STATUS",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.FAIL,  # Conflict: PASS vs FAIL!
+                    observed_value="HER2 Negative (FISH ratio 1.2)",
+                    expected_value="HER2+",
+                )
+            ],
+        ),
+    ]
+
+    report = coordinator.evaluate(
+        patient_id="PATIENT_015",
+        trial_id="NCT05001234",
+        agent_results=agent_results,
+    )
+
+    assert report.overall_status == OverallStatus.REQUIRES_REVIEW
+    assert report.requires_human_review is True
+    assert any("Conflicting evaluation results for criterion 'CRIT_HER2_STATUS'" in err for err in report.errors)
+
+
+def test_coordinator_malformed_evidence_field(coordinator: EligibilityCoordinator):
+    """Test validation: Malformed evidence dictionary (e.g., confidence out of bounds) caught safely."""
+    raw_results = [
+        {
+            "agent_id": "labs_agent",
+            "criteria_results": [
+                {
+                    "criterion_id": "CRIT_LAB_ALT",
+                    "criterion_type": "MANDATORY",
+                    "status": "PASS",
+                    "observed_value": 30,
+                    "expected_value": "<= 50",
+                    "evidence": {
+                        "source": "Lab_Report",
+                        "confidence": 1.5,  # Invalid: confidence must be <= 1.0
+                    },
+                }
+            ],
+        }
+    ]
+
+    report = coordinator.evaluate(
+        patient_id="PATIENT_016",
+        trial_id="NCT05001234",
+        agent_results=raw_results,
+    )
+
+    assert report.overall_status == OverallStatus.REQUIRES_REVIEW
+    assert report.requires_human_review is True
+    assert len(report.errors) > 0
+    assert any("Malformed" in err or "confidence" in err.lower() for err in report.errors)
+
+
+def test_coordinator_agent_execution_timeout(coordinator: EligibilityCoordinator):
+    """Test validation: Agent execution timeout is caught safely and flags REQUIRES_REVIEW."""
+    import time
+
+    def slow_agent(p_id: str, t_id: str) -> AgentResult:
+        time.sleep(0.5)
+        return AgentResult(
+            agent_id="slow_agent",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_SLOW",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                )
+            ],
+        )
+
+    report = coordinator.evaluate_with_agents(
+        patient_id="PATIENT_017",
+        trial_id="NCT05001234",
+        agents_to_run={"slow_agent": slow_agent},
+        timeout_seconds=0.1,  # 100ms timeout
+    )
+
+    assert report.overall_status == OverallStatus.REQUIRES_REVIEW
+    assert report.requires_human_review is True
+    assert any("timed out after 0.1 seconds" in err for err in report.errors)
+
+
+def test_coordinator_conflict_with_independent_mandatory_failure(coordinator: EligibilityCoordinator):
+    """
+    Test precedence: If independent mandatory criterion B definitively fails,
+    the patient is NOT_A_MATCH even if criterion A had conflicting evaluations.
+    """
+    agent_results = [
+        AgentResult(
+            agent_id="agent_a",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_STAGE",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.PASS,
+                    observed_value="Stage IV",
+                    expected_value="Stage IV",
+                ),
+                CriterionResult(
+                    criterion_id="CRIT_AGE",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.FAIL,  # Independent definitive failure
+                    observed_value=12,
+                    expected_value=">= 18",
+                    explanation="Pediatric patient.",
+                ),
+            ],
+        ),
+        AgentResult(
+            agent_id="agent_b",
+            criteria_results=[
+                CriterionResult(
+                    criterion_id="CRIT_STAGE",
+                    criterion_type=CriterionType.MANDATORY,
+                    status=CriterionStatus.FAIL,  # Conflicting with agent_a's PASS
+                    observed_value="Stage II",
+                    expected_value="Stage IV",
+                )
+            ],
+        ),
+    ]
+
+    report = coordinator.evaluate(
+        patient_id="PATIENT_018",
+        trial_id="NCT05001234",
+        agent_results=agent_results,
+    )
+
+    # Independent definitive failure of CRIT_AGE establishes NOT_A_MATCH
+    assert report.overall_status == OverallStatus.NOT_A_MATCH
+    assert report.requires_human_review is False
+    assert any("CRIT_AGE" in r and "failed" in r for r in report.reasons)
+    assert any("CRIT_STAGE" in r for r in report.reasons)
+
+
