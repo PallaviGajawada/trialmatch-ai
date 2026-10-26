@@ -9,3 +9,5 @@ venv/
 # Generated datasets and outputs
 data/processed/*
 !data/processed/.gitkeep
+
+data/patients/synthea/
